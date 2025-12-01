@@ -1,78 +1,116 @@
-import { Request, Response, NextFunction, RequestHandler } from 'express';
-import jwt from 'jsonwebtoken';
-import { PrismaClient } from '@prisma/client';
-import { JWTPayload, AuthRequest, ApiResponse } from '../types';
+import { Request, Response, NextFunction, RequestHandler } from "express";
+import { CognitoJwtVerifier } from "aws-jwt-verify";
+import { COGNITO_USER_POOL_ID, COGNITO_APP_CLIENT_ID } from "../utils/env";
+import { PrismaClient } from "@prisma/client";
 
 const prisma = new PrismaClient();
 
+declare global {
+  namespace Express {
+    interface Request {
+      user?: any;
+    }
+  }
+}
+
+const accessVerifier = CognitoJwtVerifier.create({
+  userPoolId: COGNITO_USER_POOL_ID,
+  clientId: COGNITO_APP_CLIENT_ID,
+  tokenUse: "access",
+});
+
+const idVerifier = CognitoJwtVerifier.create({
+  userPoolId: COGNITO_USER_POOL_ID,
+  clientId: COGNITO_APP_CLIENT_ID,
+  tokenUse: "id",
+});
+
+function extractToken(req: Request): string | null {
+  const authHeader = req.headers.authorization;
+  if (authHeader && authHeader.startsWith("Bearer "))
+    return authHeader.split(" ")[1];
+
+  if (req.cookies?.access_token) return req.cookies.access_token;
+  if (req.cookies?.id_token) return req.cookies.id_token;
+
+  return null;
+}
+
 export const authenticateToken = async (
-  req: AuthRequest,
+  req: Request,
   res: Response,
   next: NextFunction
 ): Promise<void> => {
   try {
-    const authHeader = req.headers.authorization;
-    const token = authHeader && authHeader.split(' ')[1]; // Bearer TOKEN
+    const token = extractToken(req);
 
     if (!token) {
-      const response: ApiResponse = {
+      res.status(401).json({
         success: false,
-        message: 'Access token required'
-      };
-      res.status(401).json(response);
+        message: "Access token required",
+      });
       return;
     }
 
-    const decoded = jwt.verify(token, process.env.JWT_SECRET!) as JWTPayload;
-    
-    // Verify user still exists
+    let decoded: any;
+
+    try {
+      decoded = await accessVerifier.verify(token);
+    } catch {
+      try {
+        decoded = await idVerifier.verify(token);
+      } catch (err) {
+        res.status(401).json({
+          success: false,
+          message: "Invalid or expired token",
+        });
+        return;
+      }
+    }
+
+    const userEmail = decoded.email;
+
     const user = await prisma.user.findUnique({
-      where: { id: decoded.userId },
-      select: { id: true, email: true, role: true, isActive: true }
+      where: { email: userEmail },
+      select: { id: true, email: true, role: true, isActive: true },
     });
 
     if (!user) {
-      const response: ApiResponse = {
+      res.status(401).json({
         success: false,
-        message: 'User not found'
-      };
-      res.status(401).json(response);
+        message: "User not found",
+      });
       return;
     }
 
-    req.user = decoded;
+    req.user = user;
     next();
   } catch (error) {
-    const response: ApiResponse = {
+    res.status(401).json({
       success: false,
-      message: 'Invalid or expired token'
-    };
-    res.status(401).json(response);
-    return;
+      message: "Invalid or expired token",
+    });
   }
 };
 
 export const authorizeRoles = (...roles: string[]): RequestHandler => {
-  return (req: AuthRequest, res: Response, next: NextFunction): void => {
+  return (req: Request, res: Response, next: NextFunction): void => {
     if (!req.user) {
-      const response: ApiResponse = {
+      res.status(401).json({
         success: false,
-        message: 'Authentication required'
-      };
-      res.status(401).json(response);
+        message: "Authentication required",
+      });
       return;
     }
 
     if (!roles.includes(req.user.role)) {
-      const response: ApiResponse = {
+      res.status(403).json({
         success: false,
-        message: 'Insufficient permissions'
-      };
-      res.status(403).json(response);
+        message: "Insufficient permissions",
+      });
       return;
     }
 
     next();
   };
 };
-

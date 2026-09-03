@@ -155,6 +155,7 @@ cd ../Models
 pip install -r requirements.txt
 uvicorn main:app --reload --port 8000
 
+Updated date 02-09-2026
 
 <div align="center">
 Built with ❤️ using Ayurvedic principles.
